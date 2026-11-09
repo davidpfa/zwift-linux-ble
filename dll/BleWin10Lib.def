@@ -1,0 +1,21 @@
+LIBRARY BleWin10Lib
+EXPORTS
+    BLEInitBLEFlags
+    BLEPairToDevice
+    BLEPurgeDeviceList
+    BLERequestBondState
+    BLESetAssertFunc
+    BLESetBLEErrorFunc
+    BLESetBondStateFunc
+    BLESetConnectionStatusCBFunc
+    BLESetEnableBLEIsAvailableFunc
+    BLESetEnableSupportsBLEFunc
+    BLESetLogFunc
+    BLESetOnPairCB
+    BLESetPeripheralDiscoveryFunc
+    BLESetProcessBLEResponse
+    BLEShutdown
+    BLEStartScanning
+    BLEStopScanning
+    BLEUnpairFromDevice
+    BLEWriteToDevice

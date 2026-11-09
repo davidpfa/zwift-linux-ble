@@ -1,0 +1,48 @@
+name: Build Release Artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev llvm clang lld
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build zwift-ble-daemon
+        run: |
+          cd daemon
+          cargo build --release
+
+      - name: Build BleWin10Lib.dll
+        run: |
+          cd dll
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Package Release
+        run: |
+          mkdir -p release
+          cp daemon/target/release/zwift-ble-daemon release/
+          cp dll/BleWin10Lib.dll release/
+          tar -czvf zwift-linux-ble-artifacts.tar.gz -C release zwift-ble-daemon BleWin10Lib.dll
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            zwift-linux-ble-artifacts.tar.gz
+            release/zwift-ble-daemon
+            release/BleWin10Lib.dll

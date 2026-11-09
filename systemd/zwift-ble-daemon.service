@@ -1,0 +1,15 @@
+[Unit]
+Description=Zwift BLE Native Linux Daemon (BlueZ <-> BleWin10Lib.dll)
+After=bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/zwift-ble-daemon
+Restart=always
+RestartSec=2s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

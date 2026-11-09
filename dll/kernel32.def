@@ -1,0 +1,18 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+    InitializeCriticalSection
+    DeleteCriticalSection
+    EnterCriticalSection
+    LeaveCriticalSection
+    CreateThread
+    WaitForSingleObject
+    CloseHandle
+    Sleep
+    GetProcessHeap
+    HeapAlloc
+    HeapFree
+    CreateFileA
+    WriteFile
+    FlushFileBuffers
+    GetTickCount64
+    DisableThreadLibraryCalls

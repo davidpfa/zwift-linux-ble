@@ -1,0 +1,6 @@
+target/
+*.obj
+*.lib
+*.exp
+bin/
+.DS_Store
