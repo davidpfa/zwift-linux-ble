@@ -9,6 +9,30 @@ ZWIFT_CONFIG="${HOME}/.config/zwift/config"
 
 echo "=== Installing zwift-linux-ble ==="
 
+# 0. Check Build Dependencies
+MISSING_DEPS=()
+for cmd in cargo clang lld-link llvm-dlltool; do
+    if ! command -v "$cmd" &>/dev/null; then
+        MISSING_DEPS+=("$cmd")
+    fi
+done
+
+if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+    echo "[-] Missing required build tools: ${MISSING_DEPS[*]}"
+    echo ""
+    echo "Please install them using your distribution's package manager:"
+    echo "  • Arch / CachyOS / EndeavourOS:"
+    echo "      sudo pacman -S --needed base-devel rust clang lld llvm"
+    echo ""
+    echo "  • Ubuntu / Debian:"
+    echo "      sudo apt update && sudo apt install -y build-essential rustc cargo clang lld llvm libdbus-1-dev"
+    echo ""
+    echo "  • Fedora:"
+    echo "      sudo dnf install -y rust cargo clang lld llvm dbus-devel"
+    echo ""
+    exit 1
+fi
+
 mkdir -p "${BIN_DEST}" "${SHARE_DEST}" "${SERVICE_DEST}"
 
 # 1. Install or compile binaries
@@ -52,13 +76,12 @@ else
     echo 'DISABLE_BLUETOOTH="0"' >> "${ZWIFT_CONFIG}"
 fi
 
-# Ensure CONTAINER_EXTRA_ARGS mounts BleWin10Lib.dll read-only
-MOUNT_ARG="-v ${SHARE_DEST}/BleWin10Lib.dll:/home/user/.wine/drive_c/Program Files (x86)/Zwift/BleWin10Lib.dll:ro"
+# Ensure CONTAINER_EXTRA_ARGS mounts BleWin10Lib.dll read-only as two array elements ("-v" "host:dest:ro")
 if grep -q 'CONTAINER_EXTRA_ARGS=' "${ZWIFT_CONFIG}"; then
     # Remove existing BleWin10Lib mounts to prevent duplicates
     sed -i '/CONTAINER_EXTRA_ARGS=/d' "${ZWIFT_CONFIG}"
 fi
-echo "CONTAINER_EXTRA_ARGS=(\"${MOUNT_ARG}\")" >> "${ZWIFT_CONFIG}"
+echo "CONTAINER_EXTRA_ARGS=(\"-v\" \"${SHARE_DEST}/BleWin10Lib.dll:/home/user/.wine/drive_c/Program Files (x86)/Zwift/BleWin10Lib.dll:ro\")" >> "${ZWIFT_CONFIG}"
 
 echo "=== Installation Complete! ==="
 echo "You can now launch Zwift directly from your desktop app menu or terminal ('zwift')."

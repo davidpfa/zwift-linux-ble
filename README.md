@@ -2,7 +2,7 @@
 
 Native Bluetooth Low Energy (BLE) peripheral support for **Zwift on Linux** via [`netbrain/zwift`](https://github.com/netbrain/zwift).
 
-Allows devices like **Zwift Play controllers** and standard **Bluetooth Heart Rate Monitors (e.g. Garmin HRM-Dual)** to connect and stream telemetry directly through Zwift's native Windows 10 BLE interface (`BleWin10Lib.dll`) without requiring a companion smartphone bridge app or secondary ANT+ dongles.
+Allows devices like **Zwift Play controllers**, **smart trainers (KICKR, Tacx, etc.)**, and standard **Bluetooth Heart Rate Monitors (Garmin HRM-Dual, Polar, Wahoo)** to connect and stream telemetry directly through Zwift's native Windows 10 BLE interface (`BleWin10Lib.dll`) without requiring a companion smartphone bridge app or secondary ANT+ dongles.
 
 ---
 
@@ -27,20 +27,41 @@ If you are setting up Zwift on Linux from scratch, follow these steps:
 
 By default, Wine cannot pass through Windows 10 Bluetooth LE GATT characteristics and notifications to Linux BlueZ. This project bridges that gap natively.
 
-1. Ensure Linux Bluetooth (**BlueZ**) is active:
-   ```bash
-   systemctl status bluetooth
-   ```
-2. Clone this repository and run the installer:
-   ```bash
-   git clone https://github.com/davidpfa/zwift-linux-ble.git
-   cd zwift-linux-ble
-   ./scripts/install.sh
-   ```
+#### 1. Install Build Dependencies
+
+Before running the installer, make sure your distribution has the required toolchains (Rust compiler, Clang/LLVM, and D-Bus headers):
+
+- **Arch / CachyOS / EndeavourOS / Manjaro**:
+  ```bash
+  sudo pacman -S --needed base-devel rust clang lld llvm
+  ```
+
+- **Ubuntu / Debian / Pop!_OS**:
+  ```bash
+  sudo apt update && sudo apt install -y build-essential rustc cargo clang lld llvm libdbus-1-dev
+  ```
+
+- **Fedora / RHEL**:
+  ```bash
+  sudo dnf install -y rust cargo clang lld llvm dbus-devel
+  ```
+
+#### 2. Ensure Linux Bluetooth is Active
+```bash
+sudo systemctl enable --now bluetooth
+```
+
+#### 3. Clone and Run the Installer
+```bash
+git clone https://github.com/davidpfa/zwift-linux-ble.git
+cd zwift-linux-ble
+./scripts/install.sh
+```
 
 The installer will automatically:
-- Build and place the background proxy daemon (`zwift-ble-daemon`) into `~/.local/bin/`
-- Build and place the replacement Windows BLE driver (`BleWin10Lib.dll`) into `~/.local/share/zwift-ble/`
+- Check that all build tools are present
+- Compile and place the background proxy daemon (`zwift-ble-daemon`) into `~/.local/bin/`
+- Compile and place the replacement Windows BLE driver (`BleWin10Lib.dll`) into `~/.local/share/zwift-ble/`
 - Register and start a systemd user service (`zwift-ble-daemon.service`) so it runs seamlessly in the background on login
 - Update your `~/.config/zwift/config` using netbrain's official `CONTAINER_EXTRA_ARGS` to mount the driver read-only into the container
 
@@ -48,9 +69,9 @@ The installer will automatically:
 
 ### Step 3: Ride!
 
-1. Wake up your Bluetooth devices (press buttons on your **Zwift Play** controllers / put on your **HRM**).
+1. Wake up your Bluetooth devices (press buttons on your **Zwift Play** controllers / put on your **HRM** / power on your trainer).
 2. Launch Zwift directly from your desktop app menu or run `zwift` in your terminal.
-3. On the **Paired Devices** screen, click **Controls** or **Heart Rate**.
+3. On the **Paired Devices** screen, click **Controls**, **Heart Rate**, or **Power Source**.
 4. Your devices will appear and pair directly over Bluetooth!
 
 ---
@@ -81,7 +102,12 @@ The installer will automatically:
 
 ## Troubleshooting & Status
 
-Check the daemon logs in real-time to see live connection and telemetry events:
+Check the daemon status:
+```bash
+systemctl --user status zwift-ble-daemon.service
+```
+
+Check real-time daemon logs to see connection and telemetry events:
 ```bash
 journalctl --user -u zwift-ble-daemon.service -f
 ```
