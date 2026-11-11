@@ -35,6 +35,23 @@ fi
 
 mkdir -p "${BIN_DEST}" "${SHARE_DEST}" "${SERVICE_DEST}"
 
+# Ensure ~/.local/bin is in PATH for future shell sessions
+if [[ ":$PATH:" != *":$BIN_DEST:"* ]]; then
+    echo "[!] Notice: ${BIN_DEST} is not currently in your PATH."
+    # Configure fish shell if installed
+    if command -v fish &>/dev/null; then
+        fish -c "fish_add_path -U ${BIN_DEST}" 2>/dev/null || true
+    fi
+    # Configure bash / zsh
+    if [[ -f "${HOME}/.bashrc" ]] && ! grep -q '\.local/bin' "${HOME}/.bashrc"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.bashrc"
+    fi
+    if [[ -f "${HOME}/.zshrc" ]] && ! grep -q '\.local/bin' "${HOME}/.zshrc"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "${HOME}/.zshrc"
+    fi
+    echo "[+] Added ${BIN_DEST} to your shell configuration."
+fi
+
 # 1. Install or compile binaries
 if [[ -f "${SCRIPT_DIR}/bin/zwift-ble-daemon" && -f "${SCRIPT_DIR}/bin/BleWin10Lib.dll" ]]; then
     echo "[+] Using pre-built release artifacts from bin/..."
@@ -85,4 +102,7 @@ echo "CONTAINER_EXTRA_ARGS=(\"-v\" \"${SHARE_DEST}/BleWin10Lib.dll:/home/user/.w
 
 echo "=== Installation Complete! ==="
 echo "You can now launch Zwift directly from your desktop app menu or terminal ('zwift')."
+if [[ ":$PATH:" != *":$BIN_DEST:"* ]]; then
+    echo "NOTE: Restart your terminal session or run 'export PATH=\"\$HOME/.local/bin:\$PATH\"' (or 'fish_add_path ~/.local/bin') to use 'zwift' directly in this terminal."
+fi
 echo "Check daemon status at any time with: systemctl --user status zwift-ble-daemon"
