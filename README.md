@@ -10,37 +10,63 @@ Allows devices like **Zwift Play controllers**, **smart trainers (KICKR, Tacx, e
 
 If you are setting up Zwift on Linux from scratch, follow these steps:
 
-### Step 1: Install `netbrain/zwift` (The Zwift Container for Linux)
+### Step 1: Install and Enable Docker / Podman
 
-[`netbrain/zwift`](https://github.com/netbrain/zwift) is the standard, battle-tested way to run Zwift under Wine containerized on modern Linux distributions (Arch, Ubuntu, Fedora, Debian, etc.).
+`netbrain/zwift` requires a container engine. If you don't already have Docker installed and running:
 
-1. Ensure **Docker** or **Podman** is installed and running on your system.
-2. Install `netbrain/zwift` by following their official quickstart:
-   ```bash
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/netbrain/zwift/master/bin/install.sh)"
-   ```
-3. Run `zwift` once to let it download Zwift and verify that the game launcher loads and runs.
+#### 1. Install & Start Docker
+- **Arch / CachyOS / EndeavourOS**:
+  ```bash
+  sudo pacman -S --needed docker
+  sudo systemctl enable --now docker
+  ```
+- **Ubuntu / Debian / Pop!_OS**:
+  ```bash
+  sudo apt update && sudo apt install -y docker.io
+  sudo systemctl enable --now docker
+  ```
+- **Fedora**:
+  ```bash
+  sudo dnf install -y docker
+  sudo systemctl enable --now docker
+  ```
+
+#### 2. Allow Your User to Run Docker Without Sudo
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+*(Verify by running `docker ps` — it should output an empty list of containers without any permission errors).*
 
 ---
 
-### Step 2: Install `zwift-linux-ble` (This Project)
+### Step 2: Install `netbrain/zwift` (The Zwift Container for Linux)
+
+[`netbrain/zwift`](https://github.com/netbrain/zwift) runs Zwift under Wine containerized on modern Linux distributions.
+
+1. Run netbrain's installer:
+   ```bash
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/netbrain/zwift/master/bin/install.sh)"
+   ```
+2. Run `zwift` once to verify that the game launcher loads and runs.
+
+---
+
+### Step 3: Install `zwift-linux-ble` (This Project)
 
 By default, Wine cannot pass through Windows 10 Bluetooth LE GATT characteristics and notifications to Linux BlueZ. This project bridges that gap natively.
 
 #### 1. Install Build Dependencies
-
-Before running the installer, make sure your distribution has the required toolchains (Rust compiler, Clang/LLVM, and D-Bus headers):
+Make sure your distribution has the required toolchains (Rust compiler, Clang/LLVM, and D-Bus headers):
 
 - **Arch / CachyOS / EndeavourOS / Manjaro**:
   ```bash
   sudo pacman -S --needed base-devel rust clang lld llvm
   ```
-
 - **Ubuntu / Debian / Pop!_OS**:
   ```bash
   sudo apt update && sudo apt install -y build-essential rustc cargo clang lld llvm libdbus-1-dev
   ```
-
 - **Fedora / RHEL**:
   ```bash
   sudo dnf install -y rust cargo clang lld llvm dbus-devel
@@ -60,6 +86,7 @@ cd zwift-linux-ble
 
 The installer will automatically:
 - Check that all build tools are present
+- Configure `~/.local/bin` in your shell PATH (supports `fish`, `bash`, and `zsh`)
 - Compile and place the background proxy daemon (`zwift-ble-daemon`) into `~/.local/bin/`
 - Compile and place the replacement Windows BLE driver (`BleWin10Lib.dll`) into `~/.local/share/zwift-ble/`
 - Register and start a systemd user service (`zwift-ble-daemon.service`) so it runs seamlessly in the background on login
@@ -67,7 +94,7 @@ The installer will automatically:
 
 ---
 
-### Step 3: Ride!
+### Step 4: Ride!
 
 1. Wake up your Bluetooth devices (press buttons on your **Zwift Play** controllers / put on your **HRM** / power on your trainer).
 2. Launch Zwift directly from your desktop app menu or run `zwift` in your terminal.
