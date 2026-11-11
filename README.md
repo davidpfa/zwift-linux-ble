@@ -38,6 +38,28 @@ newgrp docker
 ```
 *(Verify by running `docker ps` — it should output an empty list of containers without any permission errors).*
 
+#### 3. (Nvidia GPU Users Only) Install NVIDIA Container Toolkit
+If your system has an Nvidia graphics card, Docker requires the NVIDIA container runtime for 3D acceleration:
+
+- **Arch / CachyOS / EndeavourOS**:
+  ```bash
+  sudo pacman -S --needed nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo systemctl restart docker
+  ```
+- **Ubuntu / Debian**:
+  ```bash
+  sudo apt install -y nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo systemctl restart docker
+  ```
+- **Fedora**:
+  ```bash
+  sudo dnf install -y nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo systemctl restart docker
+  ```
+
 ---
 
 ### Step 2: Install `netbrain/zwift` (The Zwift Container for Linux)
