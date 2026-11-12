@@ -1,7 +1,7 @@
 use anyhow::Result;
 use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
 use bluer::gatt::WriteOp;
-use bluer::{Adapter, Address, Device, Session};
+use bluer::{Adapter, AdapterEvent, Address, Device, DiscoveryFilter, DiscoveryTransport, Session};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -507,68 +507,92 @@ async fn handle_pair_device_inner(
 
     // Serialize physical BLE connect attempts so BlueZ does not abort concurrent connections
     let mut connected = dev.is_connected().await.unwrap_or(false);
-    if !connected {
+    let mut resolved = dev.is_services_resolved().await.unwrap_or(false);
+    if !connected || !resolved {
         let _guard = connect_lock.lock().await;
         connected = dev.is_connected().await.unwrap_or(false);
-        if !connected {
-            // CRITICAL: Ensure BlueZ has fully paused discovery on the physical radio
-            // before initiating an LE connection, otherwise the Bluetooth controller rejects
-            // with 0x0C (Command Disallowed / le-connection-abort-by-local).
-            sleep(Duration::from_millis(300)).await;
-
-            for attempt in 1..=5 {
-                println!("[Daemon] Connect attempt {} for {} ({})...", attempt, addr, name);
-                match dev.connect().await {
-                    Ok(()) => {
-                        connected = true;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("[Daemon] Connect attempt {} failed for {}: {}", attempt, addr, e);
-                        if dev.is_connected().await.unwrap_or(false) {
-                            connected = true;
-                            break;
+        resolved = dev.is_services_resolved().await.unwrap_or(false);
+        if !connected || !resolved {
+            for attempt in 1..=4 {
+                // Ensure BlueZ has an active LE advertisement for this Random-address BLE device.
+                // When StopDiscovery runs, BlueZ purges temporary unbonded BLE devices or forgets their LE bearer,
+                // causing Device1.Connect() to hang for 20s on BR/EDR or fail with le-connection-abort-by-local.
+                if attempt > 1 || dev.rssi().await.ok().flatten().is_none() {
+                    println!(
+                        "[Daemon] Refreshing LE advertisement for {} before connect attempt {}...",
+                        addr, attempt
+                    );
+                    let filter = DiscoveryFilter {
+                        transport: DiscoveryTransport::Le,
+                        duplicate_data: true,
+                        ..Default::default()
+                    };
+                    let _ = adapter.set_discovery_filter(filter).await;
+                    if let Ok(mut disc) = adapter.discover_devices().await {
+                        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+                        while tokio::time::Instant::now() < deadline {
+                            if tokio::time::timeout(Duration::from_millis(200), disc.next()).await.is_ok() {
+                                if dev.rssi().await.ok().flatten().is_some() {
+                                    break;
+                                }
+                            }
                         }
-                        // Allow HCI radio to clear the failed connection attempt cleanly
-                        sleep(Duration::from_millis(1000)).await;
                     }
                 }
+
+                // Wait 400ms after stopping discovery so the HCI controller closes its LE scan window cleanly
+                sleep(Duration::from_millis(400)).await;
+
+                println!("[Daemon] Connect attempt {} for {} ({})...", attempt, addr, name);
+                let conn_res = tokio::time::timeout(Duration::from_secs(6), dev.connect()).await;
+                match conn_res {
+                    Ok(Ok(())) => {
+                        connected = true;
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("[Daemon] Connect attempt {} failed for {}: {}", attempt, addr, e);
+                        connected = dev.is_connected().await.unwrap_or(false);
+                    }
+                    Err(_) => {
+                        eprintln!("[Daemon] Connect attempt {} timed out after 6s for {}", attempt, addr);
+                        let _ = dev.disconnect().await;
+                        connected = false;
+                    }
+                }
+
+                if connected {
+                    // Wait up to 4s for GATT services to resolve on this connection
+                    for _ in 1..=40 {
+                        if dev.is_services_resolved().await.unwrap_or(false) {
+                            resolved = true;
+                            break;
+                        }
+                        if !dev.is_connected().await.unwrap_or(false) {
+                            connected = false;
+                            break;
+                        }
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                    if resolved {
+                        break;
+                    }
+                    eprintln!(
+                        "[Daemon] Connected to {} but GATT services did not resolve within 4s; resetting connection...",
+                        addr
+                    );
+                    let _ = dev.disconnect().await;
+                    connected = false;
+                }
+
+                sleep(Duration::from_millis(500)).await;
             }
         }
     }
 
-    if !connected {
-        eprintln!("[Daemon] Could not connect to {}", addr);
+    if !connected || !resolved {
+        eprintln!("[Daemon] Could not connect and resolve GATT services for {}", addr);
         let _ = tx.send(build_evt_device_update(4, addr_u64, rssi, &name, &[]));
         return;
-    }
-
-    // Wait up to 35s for GATT services to resolve over the air (complex devices like Zwift Play have many 128-bit attributes)
-    let mut resolved = false;
-    for tick in 1..=350 {
-        if dev.is_services_resolved().await.unwrap_or(false) {
-            resolved = true;
-            break;
-        }
-        if tick % 20 == 0 {
-            let still_conn = dev.is_connected().await.unwrap_or(false);
-            println!(
-                "[Daemon] Still resolving GATT services for {} ({})... ({}s, connected={})",
-                addr, name, tick / 10, still_conn
-            );
-            if !still_conn {
-                eprintln!("[Daemon] Device {} disconnected during GATT resolution", addr);
-                break;
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    if !resolved {
-        eprintln!(
-            "[Daemon] GATT services resolution timed out after 35s for {} ({})",
-            addr, name
-        );
     }
 
     let services = match dev.services().await {
@@ -810,10 +834,29 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
             // to prevent BlueZ "le-connection-abort-by-local" errors!
             if is_scanning && !is_pairing {
                 if discovery_stream.is_none() {
-                    println!("[Daemon] Starting BlueZ adapter discovery...");
-                    match adapter_scan.discover_devices().await {
-                        Ok(s) => discovery_stream = Some(s),
+                    println!("[Daemon] Starting BlueZ LE adapter discovery...");
+                    let filter = DiscoveryFilter {
+                        transport: DiscoveryTransport::Le,
+                        duplicate_data: true,
+                        ..Default::default()
+                    };
+                    let _ = adapter_scan.set_discovery_filter(filter).await;
+                    match adapter_scan.discover_devices_with_changes().await {
+                        Ok(s) => discovery_stream = Some(Box::pin(s)),
                         Err(e) => eprintln!("[Daemon] discover_devices error: {}", e),
+                    }
+                }
+                // Actively drain discovery events for up to 300ms so BlueZ updates LE advertisements
+                if let Some(stream) = discovery_stream.as_mut() {
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+                    while tokio::time::Instant::now() < deadline {
+                        match tokio::time::timeout(Duration::from_millis(50), stream.next()).await {
+                            Ok(Some(AdapterEvent::DeviceAdded(addr))) => {
+                                let _ = emit_device_advertisement(&adapter_scan, addr, &state_scan, &tx_scan).await;
+                            }
+                            Ok(Some(_)) => {}
+                            _ => break,
+                        }
                     }
                 }
                 if let Ok(addrs) = adapter_scan.device_addresses().await {
@@ -821,11 +864,14 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
                         let _ = emit_device_advertisement(&adapter_scan, addr, &state_scan, &tx_scan).await;
                     }
                 }
-            } else if discovery_stream.is_some() {
-                println!("[Daemon] Stopping BlueZ adapter discovery.");
-                discovery_stream = None;
+                sleep(Duration::from_millis(250)).await;
+            } else {
+                if discovery_stream.is_some() {
+                    println!("[Daemon] Stopping BlueZ adapter discovery.");
+                    discovery_stream = None;
+                }
+                sleep(Duration::from_millis(100)).await;
             }
-            sleep(Duration::from_millis(1000)).await;
         }
     });
 
