@@ -511,7 +511,12 @@ async fn handle_pair_device_inner(
         let _guard = connect_lock.lock().await;
         connected = dev.is_connected().await.unwrap_or(false);
         if !connected {
-            for attempt in 1..=4 {
+            // CRITICAL: Ensure BlueZ has fully paused discovery on the physical radio
+            // before initiating an LE connection, otherwise the Bluetooth controller rejects
+            // with 0x0C (Command Disallowed / le-connection-abort-by-local).
+            sleep(Duration::from_millis(300)).await;
+
+            for attempt in 1..=5 {
                 println!("[Daemon] Connect attempt {} for {} ({})...", attempt, addr, name);
                 match dev.connect().await {
                     Ok(()) => {
@@ -524,7 +529,8 @@ async fn handle_pair_device_inner(
                             connected = true;
                             break;
                         }
-                        sleep(Duration::from_millis(800)).await;
+                        // Allow HCI radio to clear the failed connection attempt cleanly
+                        sleep(Duration::from_millis(1000)).await;
                     }
                 }
             }
