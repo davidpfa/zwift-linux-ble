@@ -543,7 +543,14 @@ async fn handle_pair_device_inner(
                 // Wait 400ms after stopping discovery so the HCI controller closes its LE scan window cleanly
                 sleep(Duration::from_millis(400)).await;
 
-                println!("[Daemon] Connect attempt {} for {} ({})...", attempt, addr, name);
+                let cur_rssi = dev.rssi().await.ok().flatten();
+                println!(
+                    "[Daemon] Connect attempt {} for {} ({}) RSSI={}...",
+                    attempt,
+                    addr,
+                    name,
+                    cur_rssi.map(|r| format!("{} dBm", r)).unwrap_or_else(|| "not seen".into())
+                );
                 let conn_res = tokio::time::timeout(Duration::from_secs(6), dev.connect()).await;
                 match conn_res {
                     Ok(Ok(())) => {
@@ -561,8 +568,10 @@ async fn handle_pair_device_inner(
                 }
 
                 if connected {
-                    // Wait up to 4s for GATT services to resolve on this connection
-                    for _ in 1..=40 {
+                    // The link is up, so GATT discovery is in progress. Uncached first-time discovery on
+                    // Zwift Play can take several seconds; keep waiting while the link stays alive and
+                    // bail out immediately if it drops (never tear down a healthy connection ourselves).
+                    for _ in 1..=150 {
                         if dev.is_services_resolved().await.unwrap_or(false) {
                             resolved = true;
                             break;
@@ -576,10 +585,17 @@ async fn handle_pair_device_inner(
                     if resolved {
                         break;
                     }
-                    eprintln!(
-                        "[Daemon] Connected to {} but GATT services did not resolve within 4s; resetting connection...",
-                        addr
-                    );
+                    if connected {
+                        eprintln!(
+                            "[Daemon] Connected to {} but GATT services did not resolve within 15s; resetting connection...",
+                            addr
+                        );
+                    } else {
+                        eprintln!(
+                            "[Daemon] Link to {} dropped during GATT discovery (radio/link-layer failure)",
+                            addr
+                        );
+                    }
                     let _ = dev.disconnect().await;
                     connected = false;
                 }
