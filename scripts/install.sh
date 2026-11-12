@@ -73,7 +73,8 @@ chmod +x "${BIN_DEST}/zwift-ble-daemon"
 echo "[+] Configuring systemd user service..."
 cp "${SCRIPT_DIR}/systemd/zwift-ble-daemon.service" "${SERVICE_DEST}/"
 systemctl --user daemon-reload
-systemctl --user enable --now zwift-ble-daemon.service
+systemctl --user enable zwift-ble-daemon.service
+systemctl --user restart zwift-ble-daemon.service
 
 # 3. Configure ~/.config/zwift/config
 echo "[+] Updating netbrain Zwift config..."
