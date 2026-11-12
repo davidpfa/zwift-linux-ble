@@ -524,7 +524,7 @@ async fn handle_pair_device_inner(
                             connected = true;
                             break;
                         }
-                        sleep(Duration::from_millis(350)).await;
+                        sleep(Duration::from_millis(800)).await;
                     }
                 }
             }
