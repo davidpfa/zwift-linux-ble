@@ -76,7 +76,7 @@ If your system has an Nvidia graphics card, Docker requires the NVIDIA container
 
 ### Step 3: Install `zwift-linux-ble` (This Project)
 
-By default, Wine cannot pass through Windows 10 Bluetooth LE GATT characteristics and notifications to Linux BlueZ. This project bridges that gap natively.
+By default, Wine cannot pass through Windows 10 Bluetooth LE GATT characteristics and notifications to Linux BlueZ. This project bridges that gap natively and automatically ensures your paired devices are remembered across sessions.
 
 #### 1. Install Build Dependencies
 Make sure your distribution has the required toolchains (Rust compiler, Clang/LLVM, and D-Bus headers):
@@ -112,7 +112,8 @@ The installer will automatically:
 - Compile and place the background proxy daemon (`zwift-ble-daemon`) into `~/.local/bin/`
 - Compile and place the replacement Windows BLE driver (`BleWin10Lib.dll`) into `~/.local/share/zwift-ble/`
 - Register and start a systemd user service (`zwift-ble-daemon.service`) so it runs seamlessly in the background on login
-- Update your `~/.config/zwift/config` using netbrain's official `CONTAINER_EXTRA_ARGS` to mount the driver read-only into the container
+- Create `~/.local/share/zwift/Documents` on your host to persist your paired sensors (`knowndevices.xml`), preferences (`prefs.xml`), and activity `.fit` files
+- Update your `~/.config/zwift/config` using netbrain's official `CONTAINER_EXTRA_ARGS` to mount both the driver and the persistent documents folder
 
 ---
 
@@ -120,8 +121,8 @@ The installer will automatically:
 
 1. Wake up your Bluetooth devices (press buttons on your **Zwift Play** controllers / put on your **HRM** / power on your trainer).
 2. Launch Zwift directly from your desktop app menu or run `zwift` in your terminal.
-3. On the **Paired Devices** screen, click **Controls**, **Heart Rate**, or **Power Source**.
-4. Your devices will appear and pair directly over Bluetooth!
+3. On the **Paired Devices** screen, pair your devices once.
+4. On all future launches, Zwift will remember your devices and auto-connect to them immediately—just like on a pure Windows installation!
 
 ---
 

@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN_DEST="${HOME}/.local/bin"
 SHARE_DEST="${HOME}/.local/share/zwift-ble"
+DOCS_DEST="${HOME}/.local/share/zwift/Documents"
 SERVICE_DEST="${HOME}/.config/systemd/user"
 ZWIFT_CONFIG="${HOME}/.config/zwift/config"
 
@@ -33,7 +34,7 @@ if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
     exit 1
 fi
 
-mkdir -p "${BIN_DEST}" "${SHARE_DEST}" "${SERVICE_DEST}"
+mkdir -p "${BIN_DEST}" "${SHARE_DEST}" "${DOCS_DEST}" "${SERVICE_DEST}"
 
 # Ensure ~/.local/bin is in PATH for future shell sessions
 if [[ ":$PATH:" != *":$BIN_DEST:"* ]]; then
@@ -93,12 +94,17 @@ else
     echo 'DISABLE_BLUETOOTH="0"' >> "${ZWIFT_CONFIG}"
 fi
 
-# Ensure CONTAINER_EXTRA_ARGS mounts BleWin10Lib.dll read-only as two array elements ("-v" "host:dest:ro")
+# Ensure CONTAINER_EXTRA_ARGS mounts:
+#  1. BleWin10Lib.dll read-only (native Bluetooth bridge)
+#  2. Documents/Zwift on host (persists sensor pairings, knowndevices.xml, and prefs.xml)
 if grep -q 'CONTAINER_EXTRA_ARGS=' "${ZWIFT_CONFIG}"; then
-    # Remove existing BleWin10Lib mounts to prevent duplicates
     sed -i '/CONTAINER_EXTRA_ARGS=/d' "${ZWIFT_CONFIG}"
 fi
-echo "CONTAINER_EXTRA_ARGS=(\"-v\" \"${SHARE_DEST}/BleWin10Lib.dll:/home/user/.wine/drive_c/Program Files (x86)/Zwift/BleWin10Lib.dll:ro\")" >> "${ZWIFT_CONFIG}"
+
+DLL_MOUNT="-v \"${SHARE_DEST}/BleWin10Lib.dll:/home/user/.wine/drive_c/Program Files (x86)/Zwift/BleWin10Lib.dll:ro\""
+DOCS_MOUNT="-v \"${DOCS_DEST}:/home/user/.wine/drive_c/users/user/Documents/Zwift\""
+
+echo "CONTAINER_EXTRA_ARGS=(\"-v\" \"${SHARE_DEST}/BleWin10Lib.dll:/home/user/.wine/drive_c/Program Files (x86)/Zwift/BleWin10Lib.dll:ro\" \"-v\" \"${DOCS_DEST}:/home/user/.wine/drive_c/users/user/Documents/Zwift\")" >> "${ZWIFT_CONFIG}"
 
 echo "=== Installation Complete! ==="
 echo "You can now launch Zwift directly from your desktop app menu or terminal ('zwift')."
