@@ -543,25 +543,30 @@ async fn handle_pair_device_inner(
         return;
     }
 
-    // Wait up to 15s for GATT services to resolve (complex devices like Zwift Play have many 128-bit attributes)
+    // Wait up to 35s for GATT services to resolve over the air (complex devices like Zwift Play have many 128-bit attributes)
     let mut resolved = false;
-    for tick in 1..=150 {
+    for tick in 1..=350 {
         if dev.is_services_resolved().await.unwrap_or(false) {
             resolved = true;
             break;
         }
         if tick % 20 == 0 {
+            let still_conn = dev.is_connected().await.unwrap_or(false);
             println!(
-                "[Daemon] Still resolving GATT services for {} ({})... ({}s)",
-                addr, name, tick / 10
+                "[Daemon] Still resolving GATT services for {} ({})... ({}s, connected={})",
+                addr, name, tick / 10, still_conn
             );
+            if !still_conn {
+                eprintln!("[Daemon] Device {} disconnected during GATT resolution", addr);
+                break;
+            }
         }
         sleep(Duration::from_millis(100)).await;
     }
 
     if !resolved {
         eprintln!(
-            "[Daemon] GATT services resolution timed out after 15s for {} ({})",
+            "[Daemon] GATT services resolution timed out after 35s for {} ({})",
             addr, name
         );
     }
