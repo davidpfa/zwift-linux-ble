@@ -167,6 +167,20 @@ Restart the daemon:
 systemctl --user restart zwift-ble-daemon.service
 ```
 
+### Devices fail to connect (`le-connection-abort-by-local`, `RSSI=not seen`)
+
+If the logs show repeated `Connect attempt N failed ... le-connection-abort-by-local`, `RSSI=not seen`, or `GATT services did not resolve`, the problem is almost always the Bluetooth radio link, not the daemon:
+
+- **Don't plug the Bluetooth dongle into a USB 3 hub or next to a USB 3 port.** USB 3.0 emits 2.4 GHz interference that breaks BLE connections. Plug the dongle directly into a motherboard USB 2.0 port. If you need to bring it closer to the bike, use a short USB 2.0 extension cable. Low-bandwidth devices like an HRM may still work while Zwift Play controllers fail.
+- **Keep the adapter in line of sight of the bike.** Handlebar controllers behind the PC case or trainer often fail at around −85 dBm or weaker. The daemon logs the signal strength (RSSI) on every connect attempt.
+- **Charge the controllers.** Zwift Play controllers become unreliable when their battery is low.
+- **Test outside Zwift** to rule out the daemon:
+  ```bash
+  systemctl --user stop zwift-ble-daemon.service
+  bluetoothctl   # then: scan le → scan off → connect <MAC>
+  systemctl --user start zwift-ble-daemon.service
+  ```
+
 ---
 
 ## Uninstall
