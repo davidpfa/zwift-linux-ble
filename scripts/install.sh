@@ -56,16 +56,16 @@ fi
 # 1. Install or compile binaries
 if [[ -f "${SCRIPT_DIR}/bin/zwift-ble-daemon" && -f "${SCRIPT_DIR}/bin/BleWin10Lib.dll" ]]; then
     echo "[+] Using pre-built release artifacts from bin/..."
-    cp "${SCRIPT_DIR}/bin/zwift-ble-daemon" "${BIN_DEST}/"
-    cp "${SCRIPT_DIR}/bin/BleWin10Lib.dll" "${SHARE_DEST}/"
+    install -m 755 "${SCRIPT_DIR}/bin/zwift-ble-daemon" "${BIN_DEST}/zwift-ble-daemon"
+    install -m 644 "${SCRIPT_DIR}/bin/BleWin10Lib.dll" "${SHARE_DEST}/BleWin10Lib.dll"
 else
     echo "[+] Building zwift-ble-daemon from source..."
     (cd "${SCRIPT_DIR}/daemon" && cargo build --release)
-    cp "${SCRIPT_DIR}/daemon/target/release/zwift-ble-daemon" "${BIN_DEST}/"
+    install -m 755 "${SCRIPT_DIR}/daemon/target/release/zwift-ble-daemon" "${BIN_DEST}/zwift-ble-daemon"
 
     echo "[+] Building BleWin10Lib.dll..."
     (cd "${SCRIPT_DIR}/dll" && ./build.sh)
-    cp "${SCRIPT_DIR}/dll/BleWin10Lib.dll" "${SHARE_DEST}/"
+    install -m 644 "${SCRIPT_DIR}/dll/BleWin10Lib.dll" "${SHARE_DEST}/BleWin10Lib.dll"
 fi
 chmod +x "${BIN_DEST}/zwift-ble-daemon"
 
