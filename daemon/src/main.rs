@@ -438,6 +438,19 @@ async fn emit_device_advertisement(
     Ok(())
 }
 
+async fn cleanup_connected_device(
+    state: &Arc<Mutex<SharedState>>,
+    addr_u64: u64,
+) -> Option<Device> {
+    let mut st = state.lock().await;
+    if let Some(handles) = st.connected_tasks.remove(&addr_u64) {
+        for h in handles {
+            h.abort();
+        }
+    }
+    st.connected_devices.remove(&addr_u64).map(|(dev, _)| dev)
+}
+
 async fn handle_pair_device(
     adapter: Adapter,
     addr_u64: u64,
@@ -735,10 +748,12 @@ async fn handle_pair_device_inner(
                 );
                 let tx_clone = tx.clone();
                 let name_clone = name.clone();
+                let state_clone = state.clone();
                 let jh = tokio::spawn(async move {
                     futures::pin_mut!(stream);
                     let mut count: u64 = 0;
                     let mut last: Vec<u8> = Vec::new();
+                    let mut client_closed = false;
                     while let Some(val) = stream.next().await {
                         count += 1;
                         let changed = val != last;
@@ -759,6 +774,7 @@ async fn handle_pair_device_inner(
                             &svc_payload,
                         );
                         if tx_clone.send(frame).is_err() {
+                            client_closed = true;
                             break;
                         }
                     }
@@ -766,6 +782,22 @@ async fn handle_pair_device_inner(
                         "[Daemon] Notification stream ended for {} ({}) char {}",
                         addr, name_clone, ch_str
                     );
+                    if !client_closed {
+                        if let Some(dev) = cleanup_connected_device(&state_clone, addr_u64).await {
+                            println!(
+                                "[Daemon] Device {} ({}) dropped; clearing state and notifying ZwiftApp.exe (status=4)",
+                                addr, name_clone
+                            );
+                            let _ = dev.disconnect().await;
+                            let _ = tx_clone.send(build_evt_device_update(
+                                4,
+                                addr_u64,
+                                rssi,
+                                &name_clone,
+                                &[],
+                            ));
+                        }
+                    }
                 });
                 abort_handles.push(jh.abort_handle());
             }
@@ -802,6 +834,18 @@ async fn handle_pair_device_inner(
             }
         });
         abort_handles.push(jh.abort_handle());
+    }
+
+    if !dev.is_connected().await.unwrap_or(false) {
+        eprintln!(
+            "[Daemon] Device {} ({}) disconnected before pairing finished; notifying ZwiftApp.exe (status=4)",
+            addr, name
+        );
+        for h in abort_handles {
+            h.abort();
+        }
+        let _ = tx.send(build_evt_device_update(4, addr_u64, rssi, &name, &[]));
+        return;
     }
 
     {
