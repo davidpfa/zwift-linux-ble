@@ -178,6 +178,100 @@ struct SharedState {
     connected_tasks: HashMap<u64, Vec<tokio::task::AbortHandle>>,
     /// Devices currently executing handle_pair_device
     pairing_in_progress: HashSet<u64>,
+    /// Devices ZwiftApp.exe has asked to pair and not unpaired/purged. Used to auto-reconnect after a
+    /// link drop: on Windows the BLE stack reconnects transparently, so Zwift never re-requests a pair.
+    wanted: HashSet<u64>,
+}
+
+/// Wait until `addr` is actually heard advertising (an RSSI update, or re-creation by BlueZ), holding
+/// an LE discovery session open meanwhile. Returns false on timeout.
+async fn wait_for_advertisement(adapter: &Adapter, addr: Address, timeout: Duration) -> bool {
+    let Ok(dev) = adapter.device(addr) else { return false };
+    let Ok(dev_events) = dev.events().await else { return false };
+    let filter = DiscoveryFilter {
+        transport: DiscoveryTransport::Le,
+        duplicate_data: true,
+        ..Default::default()
+    };
+    let _ = adapter.set_discovery_filter(filter).await;
+    let Ok(disc) = adapter.discover_devices().await else { return false };
+    futures::pin_mut!(dev_events);
+    futures::pin_mut!(disc);
+    let start = tokio::time::Instant::now();
+    let deadline = sleep(timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return false,
+            ev = disc.next() => match ev {
+                // bluer replays already-known devices at the start; only trust a later re-add.
+                Some(AdapterEvent::DeviceAdded(a)) if a == addr && start.elapsed() > Duration::from_secs(1) => return true,
+                Some(_) => {}
+                None => return false,
+            },
+            ev = dev_events.next() => match ev {
+                // RSSI alone is unreliable: BlueZ only signals it on a change of >= 8 dBm, so a device
+                // re-advertising at a similar strength mid-scan stays silent. With duplicate_data set,
+                // ManufacturerData/ServiceData are signalled on every received advertisement.
+                Some(bluer::DeviceEvent::PropertyChanged(
+                    bluer::DeviceProperty::Rssi(_)
+                    | bluer::DeviceProperty::ManufacturerData(_)
+                    | bluer::DeviceProperty::ServiceData(_),
+                )) => return true,
+                Some(_) => {}
+                None => return false,
+            },
+        }
+    }
+}
+
+/// After a link drop, reconnect `addr_u64` once it advertises again, as long as Zwift still wants it.
+/// handle_pair_device sends status=3 on success, which moves Zwift from "Connecting..." to connected.
+fn spawn_reconnect(
+    adapter: Adapter,
+    addr_u64: u64,
+    state: Arc<Mutex<SharedState>>,
+    connect_lock: Arc<Mutex<()>>,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+) {
+    tokio::spawn(async move {
+        let addr = u64_to_addr(addr_u64);
+        let mut misses: u64 = 0;
+        loop {
+            if tx.is_closed() {
+                return; // ZwiftApp.exe went away
+            }
+            {
+                let st = state.lock().await;
+                if !st.wanted.contains(&addr_u64) || st.connected_devices.contains_key(&addr_u64) {
+                    return;
+                }
+                if st.pairing_in_progress.contains(&addr_u64) {
+                    drop(st);
+                    sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            }
+            if !wait_for_advertisement(&adapter, addr, Duration::from_secs(10)).await {
+                // Back off so a controller left switched off doesn't keep the radio scanning nonstop.
+                misses += 1;
+                sleep(Duration::from_secs((5 * misses).min(30))).await;
+                continue;
+            }
+            misses = 0;
+            println!("[Daemon] {} is advertising again; reconnecting", addr);
+            // Boxed to break the async type cycle (handle_pair_device -> watcher -> spawn_reconnect).
+            let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(
+                handle_pair_device(adapter.clone(), addr_u64, state.clone(), connect_lock.clone(), tx.clone()),
+            );
+            fut.await;
+            if state.lock().await.connected_devices.contains_key(&addr_u64) {
+                println!("[Daemon] Reconnected {} after link drop", addr);
+                return;
+            }
+            sleep(Duration::from_secs(3)).await;
+        }
+    });
 }
 
 fn build_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
@@ -448,6 +542,7 @@ async fn cleanup_connected_device(
             h.abort();
         }
     }
+    st.char_map.retain(|(a, _), _| *a != addr_u64);
     st.connected_devices.remove(&addr_u64).map(|(dev, _)| dev)
 }
 
@@ -749,6 +844,8 @@ async fn handle_pair_device_inner(
                 let tx_clone = tx.clone();
                 let name_clone = name.clone();
                 let state_clone = state.clone();
+                let adapter_clone = adapter.clone();
+                let lock_clone = connect_lock.clone();
                 let jh = tokio::spawn(async move {
                     futures::pin_mut!(stream);
                     let mut count: u64 = 0;
@@ -788,7 +885,8 @@ async fn handle_pair_device_inner(
                                 "[Daemon] Device {} ({}) dropped; clearing state and notifying ZwiftApp.exe (status=4)",
                                 addr, name_clone
                             );
-                            let _ = dev.disconnect().await;
+                            // cleanup_connected_device aborted this task too, so do everything that must
+                            // happen before the next .await (where the abort takes effect).
                             let _ = tx_clone.send(build_evt_device_update(
                                 4,
                                 addr_u64,
@@ -796,6 +894,8 @@ async fn handle_pair_device_inner(
                                 &name_clone,
                                 &[],
                             ));
+                            spawn_reconnect(adapter_clone, addr_u64, state_clone.clone(), lock_clone, tx_clone.clone());
+                            let _ = dev.disconnect().await;
                         }
                     }
                 });
@@ -848,6 +948,40 @@ async fn handle_pair_device_inner(
         return;
     }
 
+    // Watch BlueZ's Connected property for the link dropping (sleep, power-off, out of range). The
+    // notification streams above do not reliably end on disconnect here (they just go quiet), so the
+    // stream-ended path alone can miss a drop. Whichever path wins cleanup_connected_device sends
+    // status=4 and starts the auto-reconnect; the other finds nothing to clean up.
+    match dev.events().await {
+        Ok(events) => {
+            let state_clone = state.clone();
+            let tx_clone = tx.clone();
+            let name_clone = name.clone();
+            let adapter_clone = adapter.clone();
+            let lock_clone = connect_lock.clone();
+            let jh = tokio::spawn(async move {
+                futures::pin_mut!(events);
+                while let Some(ev) = events.next().await {
+                    if let bluer::DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(false)) = ev {
+                        break;
+                    }
+                }
+                // Also aborts this task; no .await follows, so the rest still runs.
+                if cleanup_connected_device(&state_clone, addr_u64).await.is_none() {
+                    return; // already torn down (CMD_UNPAIR_DEVICE or the stream-ended path)
+                }
+                println!(
+                    "[Daemon] Link to {} ({}) dropped; sending status=4 (Disconnected) and reconnecting when it advertises",
+                    addr, name_clone
+                );
+                let _ = tx_clone.send(build_evt_device_update(4, addr_u64, rssi, &name_clone, &[]));
+                spawn_reconnect(adapter_clone, addr_u64, state_clone.clone(), lock_clone, tx_clone.clone());
+            });
+            abort_handles.push(jh.abort_handle());
+        }
+        Err(e) => eprintln!("[Daemon] Could not watch connection events for {}: {}", addr, e),
+    }
+
     {
         let mut st = state.lock().await;
         st.connected_devices.insert(addr_u64, (dev, retained_services));
@@ -898,6 +1032,7 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
         connected_devices: HashMap::new(),
         connected_tasks: HashMap::new(),
         pairing_in_progress: HashSet::new(),
+        wanted: HashSet::new(),
     }));
 
     // Writer task
@@ -1047,6 +1182,7 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
             CMD_PAIR_DEVICE => {
                 if payload.len() >= 8 {
                     let addr_u64 = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+                    state.lock().await.wanted.insert(addr_u64);
                     let adapter_c = adapter.clone();
                     let state_c = state.clone();
                     let lock_c = connect_lock.clone();
@@ -1061,6 +1197,8 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
                     let addr_u64 = u64::from_le_bytes(payload[0..8].try_into().unwrap());
                     let addr = u64_to_addr(addr_u64);
                     // Zwift sends PAIR -> UNPAIR -> PAIR in quick succession during auto-connect.
+                    // Stop any auto-reconnect; a following PAIR re-adds it.
+                    state.lock().await.wanted.remove(&addr_u64);
                     // Ignore UNPAIR while a pairing is in flight so we don't tear down a half-open connection.
                     if state.lock().await.pairing_in_progress.contains(&addr_u64) {
                         println!(
@@ -1095,6 +1233,7 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
             }
             CMD_PURGE_DEVICES => {
                 println!("[Daemon] CMD_PURGE_DEVICES");
+                state.lock().await.wanted.clear();
             }
             CMD_WRITE_CHAR => {
                 if payload.len() >= 14 {
