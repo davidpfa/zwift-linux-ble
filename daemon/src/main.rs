@@ -924,6 +924,14 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
             // to prevent BlueZ "le-connection-abort-by-local" errors!
             if is_scanning && !is_pairing {
                 if discovery_stream.is_none() {
+                    if !adapter_scan.is_powered().await.unwrap_or(false) {
+                        println!("[Daemon] Bluetooth adapter is powered off; attempting to power on...");
+                        if let Err(e) = adapter_scan.set_powered(true).await {
+                            eprintln!("[Daemon] Failed to power on Bluetooth adapter: {} (check rfkill / adapter)", e);
+                            sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
+                    }
                     println!("[Daemon] Starting BlueZ LE adapter discovery...");
                     let filter = DiscoveryFilter {
                         transport: DiscoveryTransport::Le,
@@ -933,7 +941,11 @@ async fn handle_client(stream: TcpStream, adapter: Adapter) -> Result<()> {
                     let _ = adapter_scan.set_discovery_filter(filter).await;
                     match adapter_scan.discover_devices_with_changes().await {
                         Ok(s) => discovery_stream = Some(Box::pin(s)),
-                        Err(e) => eprintln!("[Daemon] discover_devices error: {}", e),
+                        Err(e) => {
+                            eprintln!("[Daemon] discover_devices error: {}", e);
+                            sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
                     }
                 }
                 // Actively drain discovery events for up to 300ms so BlueZ updates LE advertisements
