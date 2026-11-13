@@ -623,6 +623,7 @@ async fn handle_pair_device_inner(
     let mut out_services: Vec<(String, Vec<(String, Vec<u8>)>)> = Vec::new();
     let mut notify_chars: Vec<(String, String, Uuid, Characteristic)> = Vec::new();
     let mut retained_services: Vec<bluer::gatt::remote::Service> = Vec::new();
+    let mut battery_char: Option<(String, String, Characteristic)> = None;
 
     for svc in services {
         let svc_uuid = match svc.uuid().await {
@@ -671,10 +672,13 @@ async fn handle_pair_device_inner(
 
             // Do NOT perform slow blocking ch.read() on every Device Information characteristic before status=3,
             // and NEVER read notify characteristics (like 00000004-... which holds stale handshake bytes).
-            // Only read Battery Level (2A19) with a short timeout if readable.
+            // Only read Battery Level (2A19) with a short timeout if readable. 2A19 is exempt from the
+            // notify rule: it is usually read+notify (Zwift Play, Polar H10) but only notifies on change,
+            // so without this read Zwift never gets a level and shows the battery as empty.
             let mut init_val = Vec::new();
             let ch_hyphen = ch_uuid.hyphenated().to_string();
-            if can_read && !can_notify && ch_hyphen.starts_with("00002a19-") {
+            if can_read && ch_hyphen.starts_with("00002a19-") {
+                battery_char = Some((svc_uuid_str.clone(), ch_uuid_str.clone(), ch.clone()));
                 if let Ok(Ok(v)) = tokio::time::timeout(Duration::from_millis(400), ch.read()).await {
                     init_val = v;
                 }
@@ -772,6 +776,32 @@ async fn handle_pair_device_inner(
                 );
             }
         }
+    }
+
+    // Battery Level (2A19) only notifies on change, and ZwiftApp.exe appears to ignore the value bundled
+    // in status=3. Deliver it as a status=2 notification shortly after connect (as a WinRT read result
+    // would arrive), then refresh it periodically.
+    if let Some((svc_str, ch_str, ch)) = battery_char {
+        let tx_clone = tx.clone();
+        let name_clone = name.clone();
+        let jh = tokio::spawn(async move {
+            sleep(Duration::from_secs(2)).await;
+            loop {
+                if let Ok(Ok(val)) = tokio::time::timeout(Duration::from_secs(3), ch.read()).await {
+                    println!(
+                        "[Daemon] Battery level for {} ({}): {:?}% (forwarding as notification)",
+                        addr, name_clone, val.first()
+                    );
+                    let svc_payload = vec![(svc_str.clone(), vec![(ch_str.clone(), val)])];
+                    let frame = build_evt_device_update(2, addr_u64, rssi, &name_clone, &svc_payload);
+                    if tx_clone.send(frame).is_err() {
+                        break;
+                    }
+                }
+                sleep(Duration::from_secs(300)).await;
+            }
+        });
+        abort_handles.push(jh.abort_handle());
     }
 
     {
