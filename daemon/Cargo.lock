@@ -781,6 +781,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bluer",
+ "dbus",
+ "dbus-tokio",
  "futures",
  "tokio",
  "uuid",

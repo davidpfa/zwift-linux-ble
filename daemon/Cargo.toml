@@ -9,6 +9,8 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 bluer = { version = "0.17.4", features = ["full"] }
+dbus = "0.9"
+dbus-tokio = "0.7"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 uuid = "1"

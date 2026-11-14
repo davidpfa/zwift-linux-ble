@@ -2,12 +2,14 @@ use anyhow::Result;
 use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
 use bluer::gatt::WriteOp;
 use bluer::{Adapter, AdapterEvent, Address, Device, DiscoveryFilter, DiscoveryTransport, Session};
+use dbus::nonblock::{Proxy, SyncConnection};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
@@ -532,6 +534,63 @@ async fn emit_device_advertisement(
     Ok(())
 }
 
+static BEARER_LE1_SUPPORTED: AtomicBool = AtomicBool::new(true);
+static DBUS_SYS_CONN: OnceCell<Arc<SyncConnection>> = OnceCell::const_new();
+
+async fn get_system_dbus() -> Option<&'static Arc<SyncConnection>> {
+    DBUS_SYS_CONN
+        .get_or_try_init(|| async {
+            let (resource, conn) = dbus_tokio::connection::new_system_sync()
+                .map_err(|e| format!("D-Bus system connection failed: {}", e))?;
+            tokio::spawn(async move {
+                let err = resource.await;
+                eprintln!("[Daemon] D-Bus connection lost: {}", err);
+            });
+            Ok::<_, String>(conn)
+        })
+        .await
+        .ok()
+}
+
+/// Connect strictly over LE using BlueZ's `org.bluez.Bearer.LE1.Connect` (BlueZ >= 5.88) so fixed
+/// public-address BLE devices (e.g. Polar H10) don't waste ~6s trying Classic BR/EDR first.
+/// Automatically falls back to `Device1.Connect` on older BlueZ versions that lack `Bearer.LE1`.
+async fn connect_le(adapter: &Adapter, addr: Address, dev: &Device) -> std::result::Result<(), String> {
+    if BEARER_LE1_SUPPORTED.load(Ordering::Relaxed) {
+        if let Some(conn) = get_system_dbus().await {
+            let dev_path = format!(
+                "/org/bluez/{}/dev_{}",
+                adapter.name(),
+                addr.to_string().replace(':', "_").to_ascii_uppercase()
+            );
+            let proxy = Proxy::new("org.bluez", dev_path, Duration::from_secs(10), conn.clone());
+            match proxy
+                .method_call::<(), _, _, _>("org.bluez.Bearer.LE1", "Connect", ())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let err_name = e.name().unwrap_or("");
+                    if err_name == "org.freedesktop.DBus.Error.UnknownMethod"
+                        || err_name == "org.freedesktop.DBus.Error.UnknownInterface"
+                    {
+                        if BEARER_LE1_SUPPORTED.swap(false, Ordering::Relaxed) {
+                            println!(
+                                "[Daemon] org.bluez.Bearer.LE1 not supported by this BlueZ version; falling back to Device1.Connect"
+                            );
+                        }
+                    } else if err_name == "org.freedesktop.DBus.Error.UnknownObject" {
+                        // Device object temporarily missing; fall back for this attempt without disabling globally.
+                    } else {
+                        return Err(e.to_string());
+                    }
+                }
+            }
+        }
+    }
+    dev.connect().await.map_err(|e| e.to_string())
+}
+
 async fn cleanup_connected_device(
     state: &Arc<Mutex<SharedState>>,
     addr_u64: u64,
@@ -659,7 +718,11 @@ async fn handle_pair_device_inner(
                     name,
                     cur_rssi.map(|r| format!("{} dBm", r)).unwrap_or_else(|| "not seen".into())
                 );
-                let conn_res = tokio::time::timeout(Duration::from_secs(6), dev.connect()).await;
+                let conn_res = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    connect_le(&adapter, addr, &dev),
+                )
+                .await;
                 match conn_res {
                     Ok(Ok(())) => {
                         connected = true;
@@ -669,7 +732,7 @@ async fn handle_pair_device_inner(
                         connected = dev.is_connected().await.unwrap_or(false);
                     }
                     Err(_) => {
-                        eprintln!("[Daemon] Connect attempt {} timed out after 6s for {}", attempt, addr);
+                        eprintln!("[Daemon] Connect attempt {} timed out after 10s for {}", attempt, addr);
                         let _ = dev.disconnect().await;
                         connected = false;
                     }
