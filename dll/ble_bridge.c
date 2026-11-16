@@ -297,6 +297,62 @@ static volatile SOCKET  g_sock = INVALID_SOCKET;
 static uint8_t* g_cached_scan_payload = NULL;
 static uint32_t g_cached_scan_payload_len = 0;
 
+/* Characteristic UUIDs ZwiftApp.exe asked for per filter service in BLEStartScanning (guarded by g_lock).
+ * ZwiftApp.exe's ProcessBLEResponse handler fans a status-5 (Service Advertisement) BLEDevice out into
+ * one internal message per (service, characteristic) pair, and only those messages can create a new
+ * device. A matched service with an empty characteristic list therefore produces nothing, so a device
+ * that is not already known (e.g. a trainer never paired over BLE) never shows up in the pairing list.
+ * We attach the filter characteristics to each matched service, which is what lets Zwift create it. */
+#define MAX_FILTER_SVCS  64
+#define MAX_FILTER_CHARS 16
+#define MAX_UUID_STR     48
+typedef struct {
+    char svc[MAX_UUID_STR];
+    int  num_chars;
+    char chars[MAX_FILTER_CHARS][MAX_UUID_STR];
+} FilterSvc;
+static FilterSvc g_filter[MAX_FILTER_SVCS];
+static int       g_filter_count = 0;
+
+static bool uuid_str_eq(const char* a, size_t alen, const char* b, size_t blen) {
+    if (alen != blen) return false;
+    for (size_t i = 0; i < alen; i++) {
+        char x = a[i], y = b[i];
+        if (x >= 'a' && x <= 'z') x -= 32;
+        if (y >= 'a' && y <= 'z') y -= 32;
+        if (x != y) return false;
+    }
+    return true;
+}
+
+static FilterSvc* filter_find(const char* s, size_t slen) {
+    for (int i = 0; i < g_filter_count; i++) {
+        if (uuid_str_eq(g_filter[i].svc, my_strlen(g_filter[i].svc), s, slen)) return &g_filter[i];
+    }
+    return NULL;
+}
+
+/* Caller holds g_lock. */
+static void filter_add(const char* s, size_t slen, const char* c, size_t clen) {
+    if (slen == 0 || slen >= MAX_UUID_STR) return;
+    FilterSvc* f = filter_find(s, slen);
+    if (!f) {
+        if (g_filter_count >= MAX_FILTER_SVCS) return;
+        f = &g_filter[g_filter_count++];
+        memcpy(f->svc, s, slen);
+        f->svc[slen] = '\0';
+        f->num_chars = 0;
+    }
+    if (!c || clen == 0 || clen >= MAX_UUID_STR) return;
+    for (int j = 0; j < f->num_chars; j++) {
+        if (uuid_str_eq(f->chars[j], my_strlen(f->chars[j]), c, clen)) return;
+    }
+    if (f->num_chars >= MAX_FILTER_CHARS) return;
+    memcpy(f->chars[f->num_chars], c, clen);
+    f->chars[f->num_chars][clen] = '\0';
+    f->num_chars++;
+}
+
 static void ensure_init_locks(void) {
     if (!g_cs_initialized) {
         InitializeCriticalSection(&g_lock);
@@ -569,6 +625,24 @@ static void handle_evt_advertisement(Reader* r) {
     }
 
     EnterCriticalSection(&g_lock);
+    /* Attach the filter characteristics for each matched service (see g_filter). */
+    static const uint8_t k_empty_value = 0;
+    for (uint16_t i = 0; i < num_matched_svcs; i++) {
+        uint64_t slen = 0;
+        const char* sstr = msvc_string_cstr(&svcs[i].serviceUuid, &slen);
+        FilterSvc* f = filter_find(sstr, (size_t)slen);
+        if (!f || f->num_chars == 0) continue;
+        BLECharacteristic* chars = (BLECharacteristic*)my_alloc(sizeof(BLECharacteristic) * f->num_chars);
+        for (int j = 0; j < f->num_chars; j++) {
+            memset(&chars[j], 0, sizeof(chars[j]));
+            msvc_string_init(&chars[j].charUuid, f->chars[j], my_strlen(f->chars[j]));
+            chars[j].dataPtr = &k_empty_value;
+            chars[j].dataLen = 0;
+        }
+        svcs[i].characteristics.begin = chars;
+        svcs[i].characteristics.end = chars + f->num_chars;
+        svcs[i].characteristics.cap = chars + f->num_chars;
+    }
     if (g_PeripheralDiscoveryFunc) {
         g_PeripheralDiscoveryFunc(&adv);
     }
@@ -590,6 +664,13 @@ static void handle_evt_advertisement(Reader* r) {
 
     for (uint16_t i = 0; i < num_matched_svcs; i++) {
         msvc_string_free(&svcs[i].serviceUuid);
+        BLECharacteristic* chars = svcs[i].characteristics.begin;
+        if (chars) {
+            for (BLECharacteristic* c = chars; c < svcs[i].characteristics.end; c++) {
+                msvc_string_free(&c->charUuid);
+            }
+            my_free(chars);
+        }
     }
     my_free(svcs);
 
@@ -932,6 +1013,24 @@ __declspec(dllexport) void __cdecl BLEStartScanning(const msvc_vec_service* filt
             }
         }
     }
+
+    EnterCriticalSection(&g_lock);
+    g_filter_count = 0;
+    for (uint32_t i = 0; i < num_svcs; i++) {
+        const BLEService* svc = &filterServices->begin[i];
+        uint64_t slen = 0;
+        const char* sstr = msvc_string_cstr(&svc->serviceUuid, &slen);
+        filter_add(sstr, (size_t)slen, NULL, 0);
+        if (svc->characteristics.begin && svc->characteristics.end >= svc->characteristics.begin) {
+            uint32_t nc = (uint32_t)(svc->characteristics.end - svc->characteristics.begin);
+            for (uint32_t j = 0; j < nc; j++) {
+                uint64_t clen = 0;
+                const char* cstr = msvc_string_cstr(&svc->characteristics.begin[j].charUuid, &clen);
+                filter_add(sstr, (size_t)slen, cstr, (size_t)clen);
+            }
+        }
+    }
+    LeaveCriticalSection(&g_lock);
 
     uint8_t* buf = (uint8_t*)my_alloc(total_size);
     uint32_t pos = 0;
