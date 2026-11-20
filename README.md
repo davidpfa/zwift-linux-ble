@@ -181,6 +181,19 @@ If the logs show repeated `Connect attempt N failed ... le-connection-abort-by-l
   systemctl --user start zwift-ble-daemon.service
   ```
 
+### Zwift Play shows up as one device
+
+Current Zwift Play firmware bonds the two controllers: the left one connects through the right one, so Zwift pairs them as a single **"Zwift Play XXXX"** device with one battery level. This is expected, and both controllers work.
+
+If you paired the controllers with an older version of this daemon, Zwift may still remember **"Zwift Play-R XXXX"**. Unpair it in the pairing screen and pair the single "Zwift Play" entry instead.
+
+If an older Zwift build doesn't list the controllers at all, map them back to the original controller types:
+```bash
+mkdir -p ~/.config/systemd/user/zwift-ble-daemon.service.d
+printf '[Service]\nEnvironment=ZWIFT_PLAY_REWRITE=1\n' > ~/.config/systemd/user/zwift-ble-daemon.service.d/play-rewrite.conf
+systemctl --user daemon-reload && systemctl --user restart zwift-ble-daemon.service
+```
+
 ---
 
 ## Uninstall

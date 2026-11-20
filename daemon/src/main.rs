@@ -169,6 +169,31 @@ fn zwift_type_cache() -> &'static std::sync::Mutex<HashMap<u64, u8>> {
     CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Maps a Zwift (0x094A) manufacturer-data device type to the one forwarded to ZwiftApp.exe.
+///
+/// Current Zwift Play firmware advertises device type 14 (0x0E, right) and 15 (0x0F, left) and
+/// bonds the pair: the left controller relays through the right one, so only one BLE link is
+/// needed. Current ZwiftApp.exe (verified on 1.125.0) recognises these types natively and shows
+/// the pair as a single "Zwift Play" device with one battery level. So by default the type is
+/// passed through unchanged.
+///
+/// The rewrite was originally added for ZwiftApp builds that only mapped the RC1 types 2 (right,
+/// "-R") and 3 (left, "-L"). Set ZWIFT_PLAY_REWRITE=1 to map 14 -> 2 and 15 -> 3 if an older
+/// build doesn't list the controllers at all. With the rewrite on,
+/// a current Zwift treats the bonded pair as two independent RC1 controllers: only the right one
+/// connects (the left still works through it), and Zwift never shows the left as connected.
+fn zwift_play_device_type(raw: u8) -> u8 {
+    static REWRITE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let rewrite = *REWRITE.get_or_init(|| {
+        std::env::var("ZWIFT_PLAY_REWRITE").map(|v| v == "1").unwrap_or(false)
+    });
+    match raw {
+        14 if rewrite => 2,
+        15 if rewrite => 3,
+        t => t,
+    }
+}
+
 struct SharedState {
     scanning: bool,
     mapper: UuidMapper,
@@ -455,15 +480,7 @@ async fn emit_device_advertisement(
             has_zwift_mfg = true;
             zwift_type_cache().lock().unwrap().insert(addr_u64, payload[0]);
             let mut modified = payload.clone();
-            // Newer Zwift Play firmware advertises CP device type 14 (0x0E = Right) and 15 (0x0F = Left),
-            // whereas ZwiftApp.exe's jump table at 0x140522dc1 maps 2 -> RC1-RIGHT (Component 21) and 3 -> RC1-LEFT (Component 20).
-            // Set ZWIFT_PLAY_REWRITE=0 to pass the native device type through unchanged.
-            let rewrite = std::env::var("ZWIFT_PLAY_REWRITE").map(|v| v != "0").unwrap_or(true);
-            if rewrite && modified[0] == 14 {
-                modified[0] = 2; // RC1-RIGHT ("-R")
-            } else if rewrite && modified[0] == 15 {
-                modified[0] = 3; // RC1-LEFT ("-L")
-            }
+            modified[0] = zwift_play_device_type(modified[0]);
             sec.extend_from_slice(&modified);
         } else {
             sec.extend_from_slice(payload);
@@ -479,12 +496,7 @@ async fn emit_device_advertisement(
             // Wait for a real advertisement on a later scan pass.
             return Ok(());
         };
-        let rewrite = std::env::var("ZWIFT_PLAY_REWRITE").map(|v| v != "0").unwrap_or(true);
-        let cp_type = match raw_type {
-            14 if rewrite => 2,
-            15 if rewrite => 3,
-            t => t,
-        };
+        let cp_type = zwift_play_device_type(raw_type);
         let sec = vec![0x4a, 0x09, cp_type, addr.0[4], addr.0[5]];
         sections.push((0xFF, sec));
     }
