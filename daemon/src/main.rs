@@ -575,7 +575,7 @@ async fn connect_le(adapter: &Adapter, addr: Address, dev: &Device) -> std::resu
                 adapter.name(),
                 addr.to_string().replace(':', "_").to_ascii_uppercase()
             );
-            let proxy = Proxy::new("org.bluez", dev_path, Duration::from_secs(10), conn.clone());
+            let proxy = Proxy::new("org.bluez", dev_path, Duration::from_secs(15), conn.clone());
             match proxy
                 .method_call::<(), _, _, _>("org.bluez.Bearer.LE1", "Connect", ())
                 .await
@@ -601,6 +601,25 @@ async fn connect_le(adapter: &Adapter, addr: Address, dev: &Device) -> std::resu
         }
     }
     dev.connect().await.map_err(|e| e.to_string())
+}
+
+/// Cancel a pending or active LE connection on both `Bearer.LE1` (BlueZ >= 5.88) and `Device1`.
+/// Calling only `Device1.Disconnect` leaves a timed-out `Bearer.LE1.Connect` stuck in `In Progress`.
+async fn disconnect_le(adapter: &Adapter, addr: Address, dev: &Device) {
+    if BEARER_LE1_SUPPORTED.load(Ordering::Relaxed) {
+        if let Some(conn) = get_system_dbus().await {
+            let dev_path = format!(
+                "/org/bluez/{}/dev_{}",
+                adapter.name(),
+                addr.to_string().replace(':', "_").to_ascii_uppercase()
+            );
+            let proxy = Proxy::new("org.bluez", dev_path, Duration::from_secs(5), conn.clone());
+            let _ = proxy
+                .method_call::<(), _, _, _>("org.bluez.Bearer.LE1", "Disconnect", ())
+                .await;
+        }
+    }
+    let _ = dev.disconnect().await;
 }
 
 async fn cleanup_connected_device(
@@ -741,11 +760,16 @@ async fn handle_pair_device_inner(
                     }
                     Ok(Err(e)) => {
                         eprintln!("[Daemon] Connect attempt {} failed for {}: {}", attempt, addr, e);
+                        if e.contains("In Progress") || e.contains("InProgress") || e.contains("Timeout") {
+                            disconnect_le(&adapter, addr, &dev).await;
+                            sleep(Duration::from_millis(1500)).await;
+                        }
                         connected = dev.is_connected().await.unwrap_or(false);
                     }
                     Err(_) => {
                         eprintln!("[Daemon] Connect attempt {} timed out after 10s for {}", attempt, addr);
-                        let _ = dev.disconnect().await;
+                        disconnect_le(&adapter, addr, &dev).await;
+                        sleep(Duration::from_millis(1000)).await;
                         connected = false;
                     }
                 }
